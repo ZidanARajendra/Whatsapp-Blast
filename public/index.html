@@ -1,114 +1,880 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <title>WhatsApp Blast</title>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>WA Blast — Bulk WhatsApp Messenger</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Space+Mono:ital,wght@0,400;0,700;1,400&family=Syne:wght@400;600;700;800&display=swap" rel="stylesheet">
+  <script src="/socket.io/socket.io.js"></script>
   <style>
-    body { font-family: Arial, sans-serif; max-width: 600px; margin: 40px auto; padding: 0 20px; }
-    h1 { text-align: center; }
-    .card { border: 1px solid #ddd; border-radius: 8px; padding: 20px; margin-bottom: 20px; }
-    label { display: block; margin-top: 10px; font-weight: bold; }
-    input, textarea, button { width: 100%; padding: 8px; margin-top: 5px; box-sizing: border-box; }
-    button { background: #25D366; color: white; border: none; font-size: 16px; cursor: pointer; }
-    button:disabled { background: #ccc; cursor: not-allowed; }
-    #qr-container { text-align: center; }
-    #qr-image { max-width: 250px; }
-    .progress { margin-top: 10px; }
-    #log { background: #f9f9f9; padding: 10px; max-height: 200px; overflow-y: auto; font-size: 14px; border: 1px solid #ddd; margin-top: 10px; }
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:       #0a0c0f;
+      --surface:  #111418;
+      --surface2: #191d23;
+      --border:   #252b35;
+      --green:    #25d366;
+      --green-dim: #1a9e4a;
+      --green-glow: rgba(37,211,102,0.12);
+      --red:      #ff4d4d;
+      --yellow:   #f5a623;
+      --text:     #e8edf2;
+      --muted:    #5a6475;
+      --accent:   #25d366;
+      --radius:   8px;
+    }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'Syne', sans-serif;
+      min-height: 100vh;
+      overflow-x: hidden;
+    }
+
+    /* ── Grid noise background ── */
+    body::before {
+      content: '';
+      position: fixed; inset: 0;
+      background-image:
+        linear-gradient(rgba(37,211,102,0.03) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(37,211,102,0.03) 1px, transparent 1px);
+      background-size: 40px 40px;
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    /* ── Layout ── */
+    .app { position: relative; z-index: 1; max-width: 1100px; margin: 0 auto; padding: 0 24px 80px; }
+
+    /* ── Header ── */
+    header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 28px 0 32px;
+      border-bottom: 1px solid var(--border);
+      margin-bottom: 40px;
+    }
+    .logo { display: flex; align-items: center; gap: 14px; }
+    .logo-icon {
+      width: 42px; height: 42px; border-radius: 10px;
+      background: var(--green);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 22px; box-shadow: 0 0 20px rgba(37,211,102,0.3);
+    }
+    .logo-text h1 { font-size: 22px; font-weight: 800; letter-spacing: -0.5px; }
+    .logo-text span { font-size: 12px; color: var(--muted); font-family: 'Space Mono', monospace; }
+
+    .wa-badge {
+      display: flex; align-items: center; gap: 8px;
+      padding: 8px 16px; border-radius: 99px;
+      border: 1px solid var(--border);
+      font-family: 'Space Mono', monospace; font-size: 12px;
+      transition: all 0.3s;
+    }
+    .wa-badge .dot {
+      width: 8px; height: 8px; border-radius: 50%;
+      background: var(--muted); transition: all 0.3s;
+    }
+    .wa-badge.connected { border-color: var(--green); color: var(--green); background: var(--green-glow); }
+    .wa-badge.connected .dot { background: var(--green); box-shadow: 0 0 8px var(--green); animation: pulse 2s infinite; }
+    .wa-badge.qr { border-color: var(--yellow); color: var(--yellow); }
+    .wa-badge.qr .dot { background: var(--yellow); }
+    .wa-badge.error { border-color: var(--red); color: var(--red); }
+    .wa-badge.error .dot { background: var(--red); }
+
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.5} }
+
+    /* ── Steps ── */
+    .steps {
+      display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px;
+      margin-bottom: 40px;
+    }
+    .step-bar {
+      height: 3px; border-radius: 2px;
+      background: var(--border); transition: background 0.4s;
+    }
+    .step-bar.active { background: var(--green); box-shadow: 0 0 8px var(--green); }
+    .step-bar.done { background: var(--green-dim); }
+
+    /* ── Cards ── */
+    .card {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: 14px; padding: 32px; margin-bottom: 24px;
+      position: relative; overflow: hidden;
+      transition: border-color 0.3s;
+    }
+    .card:hover { border-color: #303840; }
+    .card.active-card { border-color: rgba(37,211,102,0.3); }
+    .card::before {
+      content: ''; position: absolute; top: 0; left: 0; right: 0; height: 1px;
+      background: linear-gradient(90deg, transparent, rgba(37,211,102,0.2), transparent);
+    }
+    .card-header {
+      display: flex; align-items: center; gap: 12px; margin-bottom: 24px;
+    }
+    .step-num {
+      width: 28px; height: 28px; border-radius: 50%;
+      background: var(--surface2); border: 1px solid var(--border);
+      display: flex; align-items: center; justify-content: center;
+      font-family: 'Space Mono', monospace; font-size: 11px; color: var(--muted);
+      flex-shrink: 0;
+    }
+    .step-num.done { background: var(--green); border-color: var(--green); color: #000; font-weight: 700; }
+    .card-header h2 { font-size: 16px; font-weight: 700; }
+    .card-header .subtitle { font-size: 12px; color: var(--muted); margin-left: auto; font-family: 'Space Mono', monospace; }
+
+    /* ── Buttons ── */
+    .btn {
+      display: inline-flex; align-items: center; gap: 8px;
+      padding: 12px 22px; border-radius: var(--radius);
+      font-family: 'Syne', sans-serif; font-size: 14px; font-weight: 700;
+      cursor: pointer; border: none; transition: all 0.2s;
+      text-transform: uppercase; letter-spacing: 0.5px;
+    }
+    .btn-primary {
+      background: var(--green); color: #000;
+      box-shadow: 0 0 20px rgba(37,211,102,0.2);
+    }
+    .btn-primary:hover { background: #2ee875; box-shadow: 0 0 30px rgba(37,211,102,0.35); transform: translateY(-1px); }
+    .btn-primary:disabled { opacity: 0.4; cursor: not-allowed; transform: none; box-shadow: none; }
+    .btn-ghost {
+      background: transparent; color: var(--text);
+      border: 1px solid var(--border);
+    }
+    .btn-ghost:hover { border-color: var(--muted); background: var(--surface2); }
+    .btn-danger {
+      background: rgba(255,77,77,0.1); color: var(--red);
+      border: 1px solid rgba(255,77,77,0.3);
+    }
+    .btn-danger:hover { background: rgba(255,77,77,0.2); }
+
+    /* ── QR Section ── */
+    .qr-wrap {
+      display: flex; flex-direction: column; align-items: center; gap: 20px;
+      padding: 20px 0;
+    }
+    .qr-frame {
+      width: 220px; height: 220px; border-radius: 16px;
+      border: 2px solid var(--border);
+      background: white;
+      display: flex; align-items: center; justify-content: center;
+      position: relative; overflow: hidden;
+    }
+    .qr-frame img { width: 200px; height: 200px; border-radius: 8px; }
+    .qr-placeholder {
+      display: flex; flex-direction: column; align-items: center; gap: 10px;
+      color: var(--muted); font-size: 13px; text-align: center; padding: 20px;
+    }
+    .qr-placeholder svg { opacity: 0.3; }
+    .qr-instructions { text-align: center; font-size: 13px; color: var(--muted); max-width: 280px; line-height: 1.6; }
+    .qr-instructions strong { color: var(--text); }
+
+    /* ── Drop Zone ── */
+    .dropzone {
+      border: 2px dashed var(--border);
+      border-radius: 12px; padding: 40px 20px;
+      text-align: center; cursor: pointer;
+      transition: all 0.25s; position: relative;
+    }
+    .dropzone:hover, .dropzone.drag-over {
+      border-color: var(--green);
+      background: var(--green-glow);
+    }
+    .dropzone input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+    .dropzone .icon { font-size: 36px; margin-bottom: 12px; }
+    .dropzone h3 { font-size: 15px; font-weight: 700; margin-bottom: 6px; }
+    .dropzone p { font-size: 13px; color: var(--muted); }
+
+    /* ── CSV Preview Table ── */
+    .table-wrap { overflow-x: auto; border-radius: 10px; border: 1px solid var(--border); margin-top: 20px; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th {
+      background: var(--surface2); padding: 10px 14px; text-align: left;
+      font-family: 'Space Mono', monospace; font-size: 11px; color: var(--muted);
+      border-bottom: 1px solid var(--border); white-space: nowrap;
+    }
+    td {
+      padding: 9px 14px; border-bottom: 1px solid var(--border);
+      color: var(--text); max-width: 180px;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    tr:last-child td { border-bottom: none; }
+    tr:hover td { background: var(--surface2); }
+
+    /* ── Form Controls ── */
+    label { display: block; font-size: 12px; font-weight: 700; color: var(--muted); margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.5px; }
+    select, input[type=number], input[type=text] {
+      width: 100%; padding: 10px 14px;
+      background: var(--surface2); border: 1px solid var(--border);
+      border-radius: var(--radius); color: var(--text); font-family: 'Syne', sans-serif; font-size: 14px;
+      outline: none; transition: border-color 0.2s;
+    }
+    select:focus, input:focus { border-color: rgba(37,211,102,0.5); }
+    select option { background: var(--surface2); }
+
+    textarea.template-editor {
+      width: 100%; min-height: 160px; padding: 14px;
+      background: var(--surface2); border: 1px solid var(--border);
+      border-radius: var(--radius); color: var(--text);
+      font-family: 'Space Mono', monospace; font-size: 13px; line-height: 1.7;
+      resize: vertical; outline: none; transition: border-color 0.2s;
+    }
+    textarea.template-editor:focus { border-color: rgba(37,211,102,0.5); }
+
+    .tag-chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+    .tag-chip {
+      padding: 4px 10px; border-radius: 4px;
+      background: var(--surface2); border: 1px solid var(--border);
+      font-family: 'Space Mono', monospace; font-size: 11px; color: var(--green);
+      cursor: pointer; transition: all 0.2s;
+    }
+    .tag-chip:hover { background: var(--green-glow); border-color: var(--green); }
+
+    .preview-box {
+      background: var(--surface2); border: 1px solid var(--border);
+      border-radius: 12px; padding: 16px 20px; margin-top: 16px;
+      font-size: 13px; line-height: 1.7; color: #c8d6e0;
+      font-family: 'Space Mono', monospace;
+      min-height: 80px; white-space: pre-wrap;
+    }
+    .preview-label { font-size: 11px; font-family: 'Space Mono', monospace; color: var(--muted); margin-bottom: 6px; }
+
+    /* ── Grid 2 col ── */
+    .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+    .form-group { margin-bottom: 16px; }
+
+    /* ── Blast Controls ── */
+    .blast-stats {
+      display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px;
+      margin-bottom: 24px;
+    }
+    .stat-box {
+      background: var(--surface2); border: 1px solid var(--border);
+      border-radius: 10px; padding: 16px;
+      text-align: center;
+    }
+    .stat-box .num { font-size: 28px; font-weight: 800; font-family: 'Space Mono', monospace; }
+    .stat-box .lbl { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; margin-top: 4px; }
+    .stat-box.green .num { color: var(--green); }
+    .stat-box.red .num { color: var(--red); }
+    .stat-box.yellow .num { color: var(--yellow); }
+
+    /* ── Progress ── */
+    .progress-wrap { margin-bottom: 20px; }
+    .progress-bar-bg {
+      height: 6px; background: var(--border); border-radius: 3px;
+      overflow: hidden; margin-bottom: 8px;
+    }
+    .progress-bar-fill {
+      height: 100%; background: var(--green); border-radius: 3px;
+      transition: width 0.4s; box-shadow: 0 0 10px rgba(37,211,102,0.4);
+    }
+    .progress-text { font-family: 'Space Mono', monospace; font-size: 11px; color: var(--muted); text-align: right; }
+
+    /* ── Log ── */
+    .log-wrap {
+      background: var(--bg); border: 1px solid var(--border);
+      border-radius: 10px; height: 220px; overflow-y: auto;
+      padding: 12px 16px;
+      font-family: 'Space Mono', monospace; font-size: 12px;
+      scroll-behavior: smooth;
+    }
+    .log-entry { display: flex; gap: 8px; margin-bottom: 6px; align-items: flex-start; }
+    .log-entry .time { color: var(--muted); flex-shrink: 0; }
+    .log-entry.success .msg { color: var(--green); }
+    .log-entry.fail .msg { color: var(--red); }
+    .log-entry.skip .msg { color: var(--yellow); }
+    .log-entry.info .msg { color: var(--muted); }
+
+    /* ── Alert ── */
+    .alert {
+      padding: 12px 16px; border-radius: var(--radius);
+      font-size: 13px; margin-bottom: 16px; display: flex; align-items: center; gap: 10px;
+    }
+    .alert-warn { background: rgba(245,166,35,0.1); border: 1px solid rgba(245,166,35,0.3); color: var(--yellow); }
+    .alert-error { background: rgba(255,77,77,0.1); border: 1px solid rgba(255,77,77,0.3); color: var(--red); }
+    .alert-success { background: var(--green-glow); border: 1px solid rgba(37,211,102,0.3); color: var(--green); }
+
+    /* ── Actions Row ── */
+    .actions { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+
+    /* ── Responsive ── */
+    @media (max-width: 640px) {
+      .steps { grid-template-columns: repeat(4, 1fr); }
+      .grid2 { grid-template-columns: 1fr; }
+      .blast-stats { grid-template-columns: repeat(3, 1fr); }
+      header { flex-direction: column; gap: 16px; align-items: flex-start; }
+    }
+
+    /* ── Spinner ── */
+    .spinner { width: 16px; height: 16px; border: 2px solid rgba(255,255,255,0.2); border-top-color: currentColor; border-radius: 50%; animation: spin 0.6s linear infinite; display: inline-block; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* ── Hidden ── */
+    .hidden { display: none !important; }
   </style>
 </head>
 <body>
-  <h1>📱 WhatsApp Blast</h1>
-  <div class="card" id="auth-card">
-    <h2>1. Connect WhatsApp</h2>
-    <div id="qr-container"></div>
-    <p id="status-text">Waiting for QR code...</p>
+<div class="app">
+
+  <!-- Header -->
+  <header>
+    <div class="logo">
+      <div class="logo-icon">📨</div>
+      <div class="logo-text">
+        <h1>WA Blast</h1>
+        <span>Bulk WhatsApp Messenger</span>
+      </div>
+    </div>
+    <div class="wa-badge" id="waBadge">
+      <div class="dot"></div>
+      <span id="waBadgeText">Disconnected</span>
+    </div>
+  </header>
+
+  <!-- Step Progress -->
+  <div class="steps">
+    <div class="step-bar" id="sb1"></div>
+    <div class="step-bar" id="sb2"></div>
+    <div class="step-bar" id="sb3"></div>
+    <div class="step-bar" id="sb4"></div>
   </div>
 
-  <div class="card" id="blast-card" style="display:none;">
-    <h2>2. Send Messages</h2>
-    <label for="csv">Upload CSV file</label>
-    <input type="file" id="csv" accept=".csv">
-    <label for="message">Message template</label>
-    <textarea id="message" rows="3" placeholder="Hi {{Name}}, this is a test from {{Company}}."></textarea>
-    <small>Use {{column_name}} as placeholders. Must have a phone/number column.</small>
-    <label for="interval">Interval between messages (seconds)</label>
-    <input type="number" id="interval" value="10" min="1">
-    <button id="send-btn">Start Blasting</button>
-    <div class="progress" id="progress"></div>
-    <div id="log"></div>
+  <!-- ── STEP 1: Connect WhatsApp ── -->
+  <div class="card" id="cardConnect">
+    <div class="card-header">
+      <div class="step-num" id="sn1">1</div>
+      <h2>Connect WhatsApp</h2>
+      <span class="subtitle">Scan QR with your phone</span>
+    </div>
+
+    <div class="qr-wrap">
+      <div class="qr-frame" id="qrFrame">
+        <div class="qr-placeholder" id="qrPlaceholder">
+          <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/>
+            <rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="3" height="3"/>
+            <rect x="19" y="14" width="2" height="2"/><rect x="14" y="19" width="2" height="2"/><rect x="18" y="18" width="3" height="3"/>
+          </svg>
+          <span>QR code will appear here</span>
+        </div>
+        <img id="qrImage" class="hidden" alt="WhatsApp QR" />
+      </div>
+
+      <div class="qr-instructions" id="qrInstructions">
+        Click <strong>Connect</strong> below, then open WhatsApp on your phone →
+        tap <strong>Linked Devices</strong> → <strong>Link a Device</strong> → scan the QR code.
+      </div>
+
+      <div class="actions">
+        <button class="btn btn-primary" id="btnConnect" onclick="connectWA()">
+          <span>Connect WhatsApp</span>
+        </button>
+        <button class="btn btn-danger hidden" id="btnDisconnect" onclick="disconnectWA()">
+          Disconnect
+        </button>
+      </div>
+    </div>
   </div>
 
-  <script>
-    const qrContainer = document.getElementById('qr-container');
-    const statusText = document.getElementById('status-text');
-    const blastCard = document.getElementById('blast-card');
-    const sendBtn = document.getElementById('send-btn');
-    const progressDiv = document.getElementById('progress');
-    const logDiv = document.getElementById('log');
+  <!-- ── STEP 2: Upload CSV ── -->
+  <div class="card" id="cardCSV">
+    <div class="card-header">
+      <div class="step-num" id="sn2">2</div>
+      <h2>Upload Contact List</h2>
+      <span class="subtitle">CSV with phone numbers</span>
+    </div>
 
-    // Connect to SSE
-    const eventSource = new EventSource('/events');
-    eventSource.onmessage = (e) => {
-      const data = JSON.parse(e.data);
-      if (data.type === 'qr') {
-        qrContainer.innerHTML = `<img id="qr-image" src="${data.data}" alt="QR Code">`;
-        statusText.textContent = 'Scan this QR code with your WhatsApp.';
-        blastCard.style.display = 'none';
-      } else if (data.type === 'status') {
-        statusText.textContent = data.message;
-        if (data.message.includes('ready') || data.message === 'Connected') {
-          qrContainer.innerHTML = '';
-          blastCard.style.display = 'block';
-        }
-      } else if (data.type === 'blast-status') {
-        progressDiv.textContent = data.message;
-        logDiv.innerHTML += `<div>${data.message}</div>`;
-        logDiv.scrollTop = logDiv.scrollHeight;
-        if (data.progress) {
-          const { sent, failed, total } = data.progress;
-          progressDiv.textContent = `Progress: ${sent} sent, ${failed} failed (total ${total})`;
-        }
-        if (data.message.startsWith('Blast finished')) {
-          sendBtn.disabled = false;
-          sendBtn.textContent = 'Start Blasting';
-        }
-      }
-    };
+    <div class="alert alert-warn" style="margin-bottom:20px">
+      ⚠️ Your CSV must have a column with phone numbers in international format (e.g. <strong>628123456789</strong> — no + sign, no dashes).
+    </div>
 
-    sendBtn.addEventListener('click', async () => {
-      const fileInput = document.getElementById('csv');
-      const message = document.getElementById('message').value;
-      const interval = document.getElementById('interval').value;
+    <div class="dropzone" id="dropzone" ondragover="onDragOver(event)" ondragleave="onDragLeave(event)" ondrop="onDrop(event)">
+      <input type="file" accept=".csv" id="csvInput" onchange="handleFile(this.files[0])">
+      <div class="icon">📄</div>
+      <h3>Drop your CSV here</h3>
+      <p>or click to browse — max 10MB</p>
+    </div>
 
-      if (!fileInput.files[0]) return alert('Select a CSV file.');
-      if (!message) return alert('Enter a message template.');
+    <div id="csvPreview" class="hidden">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-top:20px;margin-bottom:8px;">
+        <span style="font-size:13px;color:var(--muted);font-family:'Space Mono',monospace" id="csvMeta"></span>
+        <button class="btn btn-ghost" style="padding:6px 14px;font-size:12px" onclick="resetCSV()">✕ Clear</button>
+      </div>
+      <div class="table-wrap">
+        <table id="previewTable"></table>
+      </div>
+    </div>
+  </div>
 
-      const formData = new FormData();
-      formData.append('csv', fileInput.files[0]);
-      formData.append('message', message);
-      formData.append('interval', interval);
+  <!-- ── STEP 3: Compose Message ── -->
+  <div class="card" id="cardCompose">
+    <div class="card-header">
+      <div class="step-num" id="sn3">3</div>
+      <h2>Compose Message</h2>
+      <span class="subtitle">Use {{column}} for personalization</span>
+    </div>
 
-      sendBtn.disabled = true;
-      sendBtn.textContent = 'Sending...';
-      logDiv.innerHTML = '';
-      progressDiv.textContent = 'Starting...';
+    <div class="grid2">
+      <div class="form-group">
+        <label>Phone Number Column</label>
+        <select id="phoneCol"></select>
+      </div>
+      <div class="form-group">
+        <label>Delay Between Messages (ms)</label>
+        <input type="number" id="delayMs" value="2500" min="1000" max="30000" step="500">
+      </div>
+    </div>
 
-      try {
-        const res = await fetch('/api/send', { method: 'POST', body: formData });
-        if (!res.ok) {
-          const err = await res.json();
-          alert(err.error || 'Request failed');
-          sendBtn.disabled = false;
-          sendBtn.textContent = 'Start Blasting';
-        }
-        // The process continues via SSE
-      } catch (err) {
-        alert('Error: ' + err.message);
-        sendBtn.disabled = false;
-        sendBtn.textContent = 'Start Blasting';
-      }
+    <div class="form-group">
+      <label>Message Template</label>
+      <textarea class="template-editor" id="templateEditor"
+        placeholder="Hello {{name}}! This is a message from our team..."
+        oninput="updatePreview()"></textarea>
+    </div>
+
+    <div id="tagSection">
+      <p class="preview-label">AVAILABLE VARIABLES — click to insert:</p>
+      <div class="tag-chips" id="tagChips"></div>
+    </div>
+
+    <div class="form-group" style="margin-top:20px">
+      <p class="preview-label">PREVIEW (using row 1 data):</p>
+      <div class="preview-box" id="previewBox">Your preview will appear here...</div>
+    </div>
+  </div>
+
+  <!-- ── STEP 4: Send ── -->
+  <div class="card" id="cardSend">
+    <div class="card-header">
+      <div class="step-num" id="sn4">4</div>
+      <h2>Send Blast</h2>
+      <span class="subtitle" id="blastSubtitle">Ready to send</span>
+    </div>
+
+    <div class="blast-stats">
+      <div class="stat-box">
+        <div class="num" id="statTotal">—</div>
+        <div class="lbl">Total</div>
+      </div>
+      <div class="stat-box green">
+        <div class="num" id="statSent">0</div>
+        <div class="lbl">Sent ✓</div>
+      </div>
+      <div class="stat-box red">
+        <div class="num" id="statFailed">0</div>
+        <div class="lbl">Failed ✗</div>
+      </div>
+    </div>
+
+    <div class="progress-wrap hidden" id="progressWrap">
+      <div class="progress-bar-bg"><div class="progress-bar-fill" id="progressFill" style="width:0%"></div></div>
+      <div class="progress-text" id="progressText">0 / 0</div>
+    </div>
+
+    <div id="errorMsg" class="hidden"></div>
+
+    <div class="actions" id="sendActions">
+      <button class="btn btn-primary" id="btnSend" onclick="sendBlast()">
+        🚀 Start Blast
+      </button>
+    </div>
+
+    <div style="margin-top:20px">
+      <p class="preview-label">SEND LOG:</p>
+      <div class="log-wrap" id="logWrap">
+        <div class="log-entry info"><span class="time">--:--:--</span><span class="msg">Waiting to start...</span></div>
+      </div>
+    </div>
+
+    <div id="downloadWrap" class="hidden" style="margin-top:16px">
+      <button class="btn btn-ghost" onclick="downloadReport()">📥 Download Report (CSV)</button>
+    </div>
+  </div>
+
+</div>
+
+<script>
+// ── State ──────────────────────────────────────────────────────────────────
+const socket = io();
+let waStatus = 'disconnected';
+let csvRows = [];
+let csvColumns = [];
+let blastResults = [];
+let blastRunning = false;
+
+// ── Socket Events ──────────────────────────────────────────────────────────
+socket.on('wa_status', ({ status, message }) => {
+  waStatus = status;
+  updateWABadge();
+  if (status === 'ready') {
+    updateQRSection('connected');
+    addLog('info', '✓ WhatsApp connected and ready!');
+  } else if (status === 'authenticated') {
+    updateQRSection('authenticating');
+    addLog('info', '↻ Authenticating...');
+  } else if (status === 'auth_failure') {
+    updateQRSection('error', message);
+    addLog('fail', '✗ Auth failure: ' + (message || 'Unknown'));
+  } else if (status === 'disconnected') {
+    updateQRSection('idle');
+    addLog('info', '● Disconnected');
+  } else if (status === 'initializing') {
+    addLog('info', '↻ Initializing WhatsApp...');
+  }
+});
+
+socket.on('wa_qr', ({ qr }) => {
+  document.getElementById('qrPlaceholder').classList.add('hidden');
+  const img = document.getElementById('qrImage');
+  img.src = qr;
+  img.classList.remove('hidden');
+  document.getElementById('qrInstructions').textContent = 'Scan this QR with your WhatsApp → Linked Devices → Link a Device';
+  addLog('info', '↻ QR code generated — please scan');
+});
+
+socket.on('blast_start', ({ total }) => {
+  blastRunning = true;
+  blastResults = [];
+  document.getElementById('statTotal').textContent = total;
+  document.getElementById('statSent').textContent = '0';
+  document.getElementById('statFailed').textContent = '0';
+  document.getElementById('progressWrap').classList.remove('hidden');
+  document.getElementById('downloadWrap').classList.add('hidden');
+  document.getElementById('btnSend').disabled = true;
+  document.getElementById('btnSend').innerHTML = '<span class="spinner"></span> Sending...';
+  addLog('info', `▶ Blast started — ${total} recipients`);
+});
+
+socket.on('blast_progress', ({ index, total, phone, status, reason }) => {
+  const pct = Math.round(((index + 1) / total) * 100);
+  document.getElementById('progressFill').style.width = pct + '%';
+  document.getElementById('progressText').textContent = `${index + 1} / ${total}`;
+  const sent = parseInt(document.getElementById('statSent').textContent) || 0;
+  const failed = parseInt(document.getElementById('statFailed').textContent) || 0;
+  if (status === 'sent') {
+    document.getElementById('statSent').textContent = sent + 1;
+    addLog('success', `✓ Sent to +${phone}`);
+  } else if (status === 'failed') {
+    document.getElementById('statFailed').textContent = failed + 1;
+    addLog('fail', `✗ Failed +${phone}: ${reason || 'Unknown'}`);
+  } else {
+    addLog('skip', `⊘ Skipped row ${index + 1}: ${reason || 'No phone'}`);
+  }
+});
+
+socket.on('blast_done', ({ total, sent, failed, skipped, results }) => {
+  blastRunning = false;
+  blastResults = results;
+  document.getElementById('statTotal').textContent = total;
+  document.getElementById('statSent').textContent = sent;
+  document.getElementById('statFailed').textContent = failed;
+  document.getElementById('progressFill').style.width = '100%';
+  document.getElementById('progressText').textContent = `${total} / ${total}`;
+  document.getElementById('btnSend').disabled = false;
+  document.getElementById('btnSend').innerHTML = '🚀 Start Blast';
+  document.getElementById('downloadWrap').classList.remove('hidden');
+  addLog('info', `✓ Done — Sent: ${sent} | Failed: ${failed} | Skipped: ${skipped}`);
+});
+
+socket.on('blast_cancelled', () => {
+  blastRunning = false;
+  document.getElementById('btnSend').disabled = false;
+  document.getElementById('btnSend').innerHTML = '🚀 Start Blast';
+  addLog('info', '⊘ Blast cancelled');
+});
+
+// ── WA Badge ───────────────────────────────────────────────────────────────
+function updateWABadge() {
+  const badge = document.getElementById('waBadge');
+  const text = document.getElementById('waBadgeText');
+  badge.className = 'wa-badge';
+  const map = {
+    ready: ['connected', 'Connected'],
+    authenticated: ['qr', 'Authenticating...'],
+    qr: ['qr', 'Scan QR'],
+    initializing: ['qr', 'Initializing...'],
+    disconnected: ['', 'Disconnected'],
+    error: ['error', 'Error'],
+    auth_failure: ['error', 'Auth Failed'],
+  };
+  const [cls, label] = map[waStatus] || ['', 'Unknown'];
+  if (cls) badge.classList.add(cls);
+  text.textContent = label;
+  updateStepBars();
+}
+
+function updateStepBars() {
+  const isConnected = waStatus === 'ready';
+  const hasCSV = csvRows.length > 0;
+  const hasTemplate = document.getElementById('templateEditor').value.trim().length > 0;
+
+  const set = (id, active, done) => {
+    const el = document.getElementById(id);
+    el.className = 'step-bar' + (done ? ' done' : active ? ' active' : '');
+  };
+  set('sb1', waStatus !== 'disconnected', isConnected);
+  set('sb2', isConnected, hasCSV);
+  set('sb3', hasCSV, hasTemplate);
+  set('sb4', hasTemplate, false);
+
+  const markStep = (id, done) => {
+    const el = document.getElementById(id);
+    el.className = 'step-num' + (done ? ' done' : '');
+    el.textContent = done ? '✓' : id.replace('sn', '');
+  };
+  markStep('sn1', isConnected);
+  markStep('sn2', hasCSV);
+  markStep('sn3', hasTemplate);
+}
+
+function updateQRSection(state, msg) {
+  const badge = document.getElementById('waBadge');
+  const instructions = document.getElementById('qrInstructions');
+  const btnConnect = document.getElementById('btnConnect');
+  const btnDisconnect = document.getElementById('btnDisconnect');
+
+  if (state === 'connected') {
+    document.getElementById('qrPlaceholder').classList.add('hidden');
+    document.getElementById('qrImage').classList.add('hidden');
+    document.getElementById('qrFrame').innerHTML = '<div style="font-size:52px">✅</div>';
+    instructions.textContent = 'WhatsApp is connected! You can now upload your CSV and send messages.';
+    btnConnect.classList.add('hidden');
+    btnDisconnect.classList.remove('hidden');
+    document.getElementById('cardConnect').classList.add('active-card');
+  } else if (state === 'authenticating') {
+    instructions.textContent = 'Authenticating... please wait.';
+  } else if (state === 'error') {
+    instructions.textContent = 'Error: ' + (msg || 'Something went wrong. Try reconnecting.');
+    btnConnect.innerHTML = 'Retry Connect';
+    btnConnect.classList.remove('hidden');
+  } else {
+    // idle
+    const frame = document.getElementById('qrFrame');
+    frame.innerHTML = `
+      <div class="qr-placeholder" id="qrPlaceholder">
+        <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+          <rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/>
+          <rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="3" height="3"/>
+          <rect x="19" y="14" width="2" height="2"/><rect x="14" y="19" width="2" height="2"/><rect x="18" y="18" width="3" height="3"/>
+        </svg>
+        <span>QR code will appear here</span>
+      </div>
+      <img id="qrImage" class="hidden" alt="WhatsApp QR" />`;
+    instructions.textContent = 'Click Connect below, then scan the QR code in WhatsApp → Linked Devices → Link a Device.';
+    btnConnect.innerHTML = 'Connect WhatsApp';
+    btnConnect.classList.remove('hidden');
+    btnDisconnect.classList.add('hidden');
+    document.getElementById('cardConnect').classList.remove('active-card');
+  }
+}
+
+// ── WA Actions ─────────────────────────────────────────────────────────────
+async function connectWA() {
+  document.getElementById('btnConnect').innerHTML = '<span class="spinner"></span> Connecting...';
+  document.getElementById('btnConnect').disabled = true;
+  try {
+    const res = await fetch('/api/connect', { method: 'POST' });
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error);
+    addLog('info', '↻ Connecting to WhatsApp...');
+  } catch (e) {
+    addLog('fail', '✗ ' + e.message);
+    document.getElementById('btnConnect').innerHTML = 'Connect WhatsApp';
+    document.getElementById('btnConnect').disabled = false;
+  }
+}
+
+async function disconnectWA() {
+  if (!confirm('Disconnect WhatsApp? You will need to scan again next time.')) return;
+  await fetch('/api/disconnect', { method: 'POST' });
+  updateQRSection('idle');
+}
+
+// ── CSV ─────────────────────────────────────────────────────────────────────
+function onDragOver(e) { e.preventDefault(); document.getElementById('dropzone').classList.add('drag-over'); }
+function onDragLeave(e) { document.getElementById('dropzone').classList.remove('drag-over'); }
+function onDrop(e) {
+  e.preventDefault();
+  document.getElementById('dropzone').classList.remove('drag-over');
+  const file = e.dataTransfer.files[0];
+  if (file) handleFile(file);
+}
+
+async function handleFile(file) {
+  if (!file) return;
+  if (!file.name.endsWith('.csv')) return showError('Please upload a .csv file');
+
+  const fd = new FormData();
+  fd.append('csv', file);
+  const dropzone = document.getElementById('dropzone');
+  dropzone.querySelector('h3').textContent = 'Parsing...';
+
+  try {
+    const res = await fetch('/api/parse-csv', { method: 'POST', body: fd });
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error);
+
+    csvRows = data.rows;
+    csvColumns = data.columns;
+    renderCSVPreview(data);
+    buildTagChips(data.columns);
+    buildPhoneSelect(data.columns);
+    updatePreview();
+    updateStepBars();
+    addLog('info', `✓ CSV loaded — ${data.count} rows, ${data.columns.length} columns`);
+    document.getElementById('statTotal').textContent = data.count;
+  } catch (e) {
+    showError(e.message);
+    dropzone.querySelector('h3').textContent = 'Drop your CSV here';
+  }
+}
+
+function renderCSVPreview({ rows, columns, count }) {
+  const preview = document.getElementById('csvPreview');
+  document.getElementById('csvMeta').textContent = `${count} rows × ${columns.length} columns`;
+  const displayRows = rows.slice(0, 5);
+  const table = document.getElementById('previewTable');
+  table.innerHTML = `
+    <thead><tr>${columns.map(c => `<th>${c}</th>`).join('')}</tr></thead>
+    <tbody>${displayRows.map(r => `<tr>${columns.map(c => `<td title="${r[c]||''}">${r[c]||''}</td>`).join('')}</tr>`).join('')}</tbody>
+    ${count > 5 ? `<tfoot><tr><td colspan="${columns.length}" style="padding:8px 14px;color:var(--muted);font-family:'Space Mono',monospace;font-size:11px;">+ ${count - 5} more rows...</td></tr></tfoot>` : ''}
+  `;
+  document.getElementById('dropzone').classList.add('hidden');
+  preview.classList.remove('hidden');
+}
+
+function resetCSV() {
+  csvRows = []; csvColumns = [];
+  document.getElementById('csvPreview').classList.add('hidden');
+  document.getElementById('dropzone').classList.remove('hidden');
+  document.getElementById('dropzone').querySelector('h3').textContent = 'Drop your CSV here';
+  document.getElementById('csvInput').value = '';
+  document.getElementById('tagChips').innerHTML = '';
+  document.getElementById('phoneCol').innerHTML = '';
+  document.getElementById('previewBox').textContent = 'Your preview will appear here...';
+  document.getElementById('statTotal').textContent = '—';
+  updateStepBars();
+}
+
+function buildTagChips(columns) {
+  const chips = document.getElementById('tagChips');
+  chips.innerHTML = columns.map(c => `<div class="tag-chip" onclick="insertTag('${c}')">{{${c}}}</div>`).join('');
+}
+
+function buildPhoneSelect(columns) {
+  const sel = document.getElementById('phoneCol');
+  sel.innerHTML = columns.map(c => `<option value="${c}">${c}</option>`).join('');
+  // Auto-select likely phone column
+  const phoneKeywords = ['phone', 'mobile', 'number', 'wa', 'whatsapp', 'hp', 'telp', 'nomer'];
+  const auto = columns.find(c => phoneKeywords.some(k => c.toLowerCase().includes(k)));
+  if (auto) sel.value = auto;
+}
+
+function insertTag(col) {
+  const ta = document.getElementById('templateEditor');
+  const pos = ta.selectionStart;
+  const val = ta.value;
+  ta.value = val.slice(0, pos) + `{{${col}}}` + val.slice(pos);
+  ta.focus();
+  ta.selectionStart = ta.selectionEnd = pos + col.length + 4;
+  updatePreview();
+}
+
+function updatePreview() {
+  const tmpl = document.getElementById('templateEditor').value;
+  const preview = document.getElementById('previewBox');
+  if (!tmpl) { preview.textContent = 'Your preview will appear here...'; return; }
+  if (csvRows.length === 0) { preview.textContent = tmpl; return; }
+  let msg = tmpl;
+  const row = csvRows[0];
+  Object.keys(row).forEach(k => { msg = msg.replace(new RegExp(`{{${k}}}`, 'g'), row[k] || ''); });
+  preview.textContent = msg;
+  updateStepBars();
+}
+
+// ── Blast ──────────────────────────────────────────────────────────────────
+async function sendBlast() {
+  if (waStatus !== 'ready') return showError('WhatsApp is not connected!');
+  if (csvRows.length === 0) return showError('No CSV loaded!');
+  const template = document.getElementById('templateEditor').value.trim();
+  if (!template) return showError('Message template is empty!');
+  const phoneColumn = document.getElementById('phoneCol').value;
+  const delayMs = parseInt(document.getElementById('delayMs').value) || 2500;
+
+  if (!confirm(`Send to ${csvRows.length} contacts? This cannot be undone.`)) return;
+
+  hideError();
+  document.getElementById('logWrap').innerHTML = '';
+
+  try {
+    const res = await fetch('/api/send-blast', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ rows: csvRows, template, phoneColumn, delayMs }),
     });
-  </script>
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error);
+  } catch (e) {
+    showError(e.message);
+  }
+}
+
+function downloadReport() {
+  if (!blastResults.length) return;
+  const header = ['row', 'phone', 'status', 'reason'];
+  const lines = [header.join(',')];
+  blastResults.forEach(r => {
+    lines.push([r.row, r.phone, r.status, r.reason || ''].join(','));
+  });
+  const blob = new Blob([lines.join('\n')], { type: 'text/csv' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = `blast-report-${Date.now()}.csv`;
+  a.click(); URL.revokeObjectURL(url);
+}
+
+// ── Helpers ────────────────────────────────────────────────────────────────
+function addLog(type, msg) {
+  const wrap = document.getElementById('logWrap');
+  const now = new Date().toTimeString().slice(0, 8);
+  const el = document.createElement('div');
+  el.className = `log-entry ${type}`;
+  el.innerHTML = `<span class="time">${now}</span><span class="msg">${msg}</span>`;
+  wrap.appendChild(el);
+  wrap.scrollTop = wrap.scrollHeight;
+}
+
+function showError(msg) {
+  const el = document.getElementById('errorMsg');
+  el.className = 'alert alert-error';
+  el.innerHTML = '⚠ ' + msg;
+  el.classList.remove('hidden');
+}
+function hideError() { document.getElementById('errorMsg').classList.add('hidden'); }
+
+// ── Init ───────────────────────────────────────────────────────────────────
+(async () => {
+  try {
+    const res = await fetch('/api/status');
+    const data = await res.json();
+    waStatus = data.status;
+    updateWABadge();
+    if (data.status === 'ready') updateQRSection('connected');
+    if (data.qr) {
+      document.getElementById('qrPlaceholder').classList.add('hidden');
+      const img = document.getElementById('qrImage');
+      img.src = data.qr;
+      img.classList.remove('hidden');
+    }
+  } catch (e) { /* server not ready yet */ }
+})();
+
+document.getElementById('templateEditor').addEventListener('input', updateStepBars);
+</script>
 </body>
 </html>
