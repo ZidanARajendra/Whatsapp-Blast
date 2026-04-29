@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>WhatsApp Blast</title>
+  <style>
+    body { font-family: Arial, sans-serif; max-width: 600px; margin: 40px auto; padding: 0 20px; }
+    h1 { text-align: center; }
+    .card { border: 1px solid #ddd; border-radius: 8px; padding: 20px; margin-bottom: 20px; }
+    label { display: block; margin-top: 10px; font-weight: bold; }
+    input, textarea, button { width: 100%; padding: 8px; margin-top: 5px; box-sizing: border-box; }
+    button { background: #25D366; color: white; border: none; font-size: 16px; cursor: pointer; }
+    button:disabled { background: #ccc; cursor: not-allowed; }
+    #qr-container { text-align: center; }
+    #qr-image { max-width: 250px; }
+    .progress { margin-top: 10px; }
+    #log { background: #f9f9f9; padding: 10px; max-height: 200px; overflow-y: auto; font-size: 14px; border: 1px solid #ddd; margin-top: 10px; }
+  </style>
+</head>
+<body>
+  <h1>📱 WhatsApp Blast</h1>
+  <div class="card" id="auth-card">
+    <h2>1. Connect WhatsApp</h2>
+    <div id="qr-container"></div>
+    <p id="status-text">Waiting for QR code...</p>
+  </div>
+
+  <div class="card" id="blast-card" style="display:none;">
+    <h2>2. Send Messages</h2>
+    <label for="csv">Upload CSV file</label>
+    <input type="file" id="csv" accept=".csv">
+    <label for="message">Message template</label>
+    <textarea id="message" rows="3" placeholder="Hi {{Name}}, this is a test from {{Company}}."></textarea>
+    <small>Use {{column_name}} as placeholders. Must have a phone/number column.</small>
+    <label for="interval">Interval between messages (seconds)</label>
+    <input type="number" id="interval" value="10" min="1">
+    <button id="send-btn">Start Blasting</button>
+    <div class="progress" id="progress"></div>
+    <div id="log"></div>
+  </div>
+
+  <script>
+    const qrContainer = document.getElementById('qr-container');
+    const statusText = document.getElementById('status-text');
+    const blastCard = document.getElementById('blast-card');
+    const sendBtn = document.getElementById('send-btn');
+    const progressDiv = document.getElementById('progress');
+    const logDiv = document.getElementById('log');
+
+    // Connect to SSE
+    const eventSource = new EventSource('/events');
+    eventSource.onmessage = (e) => {
+      const data = JSON.parse(e.data);
+      if (data.type === 'qr') {
+        qrContainer.innerHTML = `<img id="qr-image" src="${data.data}" alt="QR Code">`;
+        statusText.textContent = 'Scan this QR code with your WhatsApp.';
+        blastCard.style.display = 'none';
+      } else if (data.type === 'status') {
+        statusText.textContent = data.message;
+        if (data.message.includes('ready') || data.message === 'Connected') {
+          qrContainer.innerHTML = '';
+          blastCard.style.display = 'block';
+        }
+      } else if (data.type === 'blast-status') {
+        progressDiv.textContent = data.message;
+        logDiv.innerHTML += `<div>${data.message}</div>`;
+        logDiv.scrollTop = logDiv.scrollHeight;
+        if (data.progress) {
+          const { sent, failed, total } = data.progress;
+          progressDiv.textContent = `Progress: ${sent} sent, ${failed} failed (total ${total})`;
+        }
+        if (data.message.startsWith('Blast finished')) {
+          sendBtn.disabled = false;
+          sendBtn.textContent = 'Start Blasting';
+        }
+      }
+    };
+
+    sendBtn.addEventListener('click', async () => {
+      const fileInput = document.getElementById('csv');
+      const message = document.getElementById('message').value;
+      const interval = document.getElementById('interval').value;
+
+      if (!fileInput.files[0]) return alert('Select a CSV file.');
+      if (!message) return alert('Enter a message template.');
+
+      const formData = new FormData();
+      formData.append('csv', fileInput.files[0]);
+      formData.append('message', message);
+      formData.append('interval', interval);
+
+      sendBtn.disabled = true;
+      sendBtn.textContent = 'Sending...';
+      logDiv.innerHTML = '';
+      progressDiv.textContent = 'Starting...';
+
+      try {
+        const res = await fetch('/api/send', { method: 'POST', body: formData });
+        if (!res.ok) {
+          const err = await res.json();
+          alert(err.error || 'Request failed');
+          sendBtn.disabled = false;
+          sendBtn.textContent = 'Start Blasting';
+        }
+        // The process continues via SSE
+      } catch (err) {
+        alert('Error: ' + err.message);
+        sendBtn.disabled = false;
+        sendBtn.textContent = 'Start Blasting';
+      }
+    });
+  </script>
+</body>
+</html>
