@@ -499,6 +499,29 @@
 </div>
 
 <script>
+// ── Session: each browser gets its own unique ID ──────────────────────────
+let SESSION_ID = localStorage.getItem('wa_session_id');
+
+async function ensureSession() {
+  if (SESSION_ID) return SESSION_ID;
+  const res = await fetch('/api/new-session', { method: 'POST' });
+  const data = await res.json();
+  SESSION_ID = data.sessionId;
+  localStorage.setItem('wa_session_id', SESSION_ID);
+  return SESSION_ID;
+}
+
+// Helper: add sessionId header to all fetch calls
+function apiFetch(url, options = {}) {
+  return fetch(url, {
+    ...options,
+    headers: {
+      ...(options.headers || {}),
+      'x-session-id': SESSION_ID,
+    },
+  });
+}
+
 // ── State ──────────────────────────────────────────────────────────────────
 const socket = io();
 let waStatus = 'disconnected';
@@ -678,7 +701,7 @@ async function connectWA() {
   document.getElementById('btnConnect').innerHTML = '<span class="spinner"></span> Connecting...';
   document.getElementById('btnConnect').disabled = true;
   try {
-    const res = await fetch('/api/connect', { method: 'POST' });
+    const res = await apiFetch('/api/connect', { method: 'POST' });
     const data = await res.json();
     if (!data.ok) throw new Error(data.error);
     addLog('info', '↻ Connecting to WhatsApp...');
@@ -691,7 +714,7 @@ async function connectWA() {
 
 async function disconnectWA() {
   if (!confirm('Disconnect WhatsApp? You will need to scan again next time.')) return;
-  await fetch('/api/disconnect', { method: 'POST' });
+  await apiFetch('/api/disconnect', { method: 'POST' });
   updateQRSection('idle');
 }
 
@@ -812,7 +835,7 @@ async function sendBlast() {
   document.getElementById('logWrap').innerHTML = '';
 
   try {
-    const res = await fetch('/api/send-blast', {
+    const res = await apiFetch('/api/send-blast', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ rows: csvRows, template, phoneColumn, delayMs }),
@@ -860,7 +883,14 @@ function hideError() { document.getElementById('errorMsg').classList.add('hidden
 // ── Init ───────────────────────────────────────────────────────────────────
 (async () => {
   try {
-    const res = await fetch('/api/status');
+    // Ensure this browser has a session ID
+    await ensureSession();
+
+    // Join the socket room for this session
+    socket.emit('join_session', SESSION_ID);
+
+    // Restore previous state if session exists
+    const res = await apiFetch('/api/status');
     const data = await res.json();
     waStatus = data.status;
     updateWABadge();
@@ -871,7 +901,7 @@ function hideError() { document.getElementById('errorMsg').classList.add('hidden
       img.src = data.qr;
       img.classList.remove('hidden');
     }
-  } catch (e) { /* server not ready yet */ }
+  } catch (e) { console.error('Init error:', e); }
 })();
 
 document.getElementById('templateEditor').addEventListener('input', updateStepBars);
