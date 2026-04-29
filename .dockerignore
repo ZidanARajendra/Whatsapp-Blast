@@ -1,0 +1,4 @@
+node_modules
+wa_session
+.git
+*.log
