@@ -1,206 +1,277 @@
 const express = require('express');
+const http = require('http');
+const { Server } = require('socket.io');
 const multer = require('multer');
-const csv = require('csv-parser');
-const fs = require('fs');
-const path = require('path');
+const { parse } = require('csv-parse');
 const { Client, LocalAuth } = require('whatsapp-web.js');
-const QRCode = require('qrcode');
+const qrcode = require('qrcode');
+const cors = require('cors');
+const path = require('path');
+const fs = require('fs');
 
 const app = express();
-const PORT = 3000;
-const upload = multer({ dest: 'uploads/' });
+const server = http.createServer(app);
+const io = new Server(server, {
+  cors: { origin: "*", methods: ["GET", "POST"] },
+  transports: ["websocket", "polling"],
+  allowEIO3: true,
+});
 
-// SSE clients storage
-let sseClients = [];
+app.use(cors({ origin: "*" }));
+app.use(express.json({ limit: "50mb" }));
 
-// WhatsApp client with persistent session (scan QR only once)
-const client = new Client({
-    authStrategy: new LocalAuth(),
+// Serve static files — check both ./public and ./ (in case index.html is in same dir)
+const publicDir = path.join(__dirname, 'public');
+const rootDir = __dirname;
+if (fs.existsSync(publicDir)) {
+  app.use(express.static(publicDir));
+} else {
+  app.use(express.static(rootDir));
+}
+
+// Explicit fallback for GET / so "Cannot GET /" never appears
+app.get('/', (req, res) => {
+  const candidates = [
+    path.join(__dirname, 'public', 'index.html'),
+    path.join(__dirname, 'index.html'),
+  ];
+  const found = candidates.find(f => fs.existsSync(f));
+  if (found) return res.sendFile(found);
+  res.send(`
+    <h2 style="font-family:monospace;padding:20px">⚠️ index.html not found</h2>
+    <p style="font-family:monospace;padding:0 20px">
+      Make sure <b>index.html</b> is inside a <b>public/</b> folder next to server.js<br><br>
+      Expected: <code>${candidates[0]}</code>
+    </p>
+  `);
+});
+
+// Multer for CSV uploads (memory storage)
+const storage = multer.memoryStorage();
+const upload = multer({
+  storage,
+  fileFilter: (req, file, cb) => {
+    if (file.mimetype === 'text/csv' || file.originalname.endsWith('.csv')) {
+      cb(null, true);
+    } else {
+      cb(new Error('Only CSV files are allowed'));
+    }
+  },
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB max
+});
+
+// ─── WhatsApp Client State ────────────────────────────────────────────────────
+let waClient = null;
+let waStatus = 'disconnected'; // disconnected | qr | ready | auth_failure
+let currentQR = null;
+let blastRunning = false;
+
+function initWhatsApp(socketId) {
+  if (waClient) {
+    try { waClient.destroy(); } catch (_) {}
+  }
+
+  waStatus = 'initializing';
+  io.emit('wa_status', { status: waStatus });
+
+  waClient = new Client({
+    authStrategy: new LocalAuth({ dataPath: './wa_session' }),
     puppeteer: {
-        headless: true,
-        args: [
-            '--no-sandbox',
-            '--disable-setuid-sandbox',
-            '--disable-dev-shm-usage',
-            '--disable-gpu',
-            '--disable-accelerated-2d-canvas',
-            '--disable-extensions',
-            '--disable-background-timer-throttling',
-            '--disable-renderer-backgrounding',
-            '--disable-field-trial-config',
-            '--no-first-run',
-            '--disable-features=TranslateUI',
-            '--disable-ipc-flooding-protection',
-            '--aggressive-cache-discard',
-            '--max_old_space_size=512'
-        ]
-    }
-});
+      headless: true,
+      executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-gpu',
+        '--no-first-run',
+        '--no-zygote',
+        '--single-process',
+      ],
+    },
+  });
 
-// Keep track of current state
-let qrCodeDataUrl = null;
-let isAuthenticated = false;
-let isSending = false;
+  waClient.on('qr', async (qr) => {
+    waStatus = 'qr';
+    currentQR = await qrcode.toDataURL(qr);
+    io.emit('wa_qr', { qr: currentQR });
+    io.emit('wa_status', { status: waStatus });
+    console.log('[WhatsApp] QR code generated');
+  });
 
-// When QR code is generated, convert to data URL and notify clients
-client.on('qr', async (qr) => {
-    qrCodeDataUrl = await QRCode.toDataURL(qr);
-    isAuthenticated = false;
-    notifyAll({ type: 'qr', data: qrCodeDataUrl });
-});
+  waClient.on('authenticated', () => {
+    waStatus = 'authenticated';
+    currentQR = null;
+    io.emit('wa_status', { status: waStatus });
+    console.log('[WhatsApp] Authenticated!');
+  });
 
-// Ready event – authenticated
-client.on('ready', () => {
-    isAuthenticated = true;
-    qrCodeDataUrl = null;
-    notifyAll({ type: 'status', message: 'WhatsApp connected and ready!' });
-});
+  waClient.on('ready', () => {
+    waStatus = 'ready';
+    io.emit('wa_status', { status: waStatus });
+    console.log('[WhatsApp] Client ready!');
+  });
 
-// Handle disconnects
-client.on('disconnected', (reason) => {
-    isAuthenticated = false;
-    notifyAll({ type: 'status', message: 'Disconnected: ' + reason });
-    client.initialize();
-});
+  waClient.on('auth_failure', (msg) => {
+    waStatus = 'auth_failure';
+    io.emit('wa_status', { status: waStatus, message: msg });
+    console.error('[WhatsApp] Auth failure:', msg);
+  });
 
-// Initialize the WhatsApp client
-client.initialize();
+  waClient.on('disconnected', (reason) => {
+    waStatus = 'disconnected';
+    io.emit('wa_status', { status: waStatus, reason });
+    console.log('[WhatsApp] Disconnected:', reason);
+    waClient = null;
+  });
 
-// Serve static files
-app.use(express.static('public'));
-app.use(express.json());
-
-// SSE endpoint
-app.get('/events', (req, res) => {
-    res.setHeader('Content-Type', 'text/event-stream');
-    res.setHeader('Cache-Control', 'no-cache');
-    res.setHeader('Connection', 'keep-alive');
-    res.flushHeaders();
-
-    sseClients.push(res);
-
-    // Send current state on connection
-    if (isAuthenticated) {
-        res.write(`data: ${JSON.stringify({ type: 'status', message: 'Connected' })}\n\n`);
-    } else if (qrCodeDataUrl) {
-        res.write(`data: ${JSON.stringify({ type: 'qr', data: qrCodeDataUrl })}\n\n`);
-    }
-
-    req.on('close', () => {
-        sseClients = sseClients.filter(client => client !== res);
-    });
-});
-
-// Notify all connected browsers
-function notifyAll(data) {
-    sseClients.forEach(client => {
-        client.write(`data: ${JSON.stringify(data)}\n\n`);
-    });
+  waClient.initialize().catch((err) => {
+    waStatus = 'error';
+    io.emit('wa_status', { status: 'error', message: err.message });
+    console.error('[WhatsApp] Init error:', err.message);
+  });
 }
 
-// Send status updates during blast
-function sendStatus(message, progress = null) {
-    notifyAll({ type: 'blast-status', message, progress });
-}
+// ─── REST API ─────────────────────────────────────────────────────────────────
 
-// API: check auth status
+// Status
 app.get('/api/status', (req, res) => {
-    res.json({ authenticated: isAuthenticated });
+  res.json({ status: waStatus, qr: currentQR, blastRunning });
 });
 
-// API: send blast
-app.post('/api/send', upload.single('csv'), async (req, res) => {
-    if (isSending) {
-        return res.status(400).json({ error: 'A sending process is already running.' });
-    }
-    if (!req.file) {
-        return res.status(400).json({ error: 'CSV file is required.' });
-    }
-    if (!req.body.message || typeof req.body.message !== 'string') {
-        return res.status(400).json({ error: 'Message template is required.' });
-    }
+// Connect WhatsApp
+app.post('/api/connect', (req, res) => {
+  if (waStatus === 'ready') {
+    return res.json({ ok: true, status: 'ready', message: 'Already connected' });
+  }
+  initWhatsApp();
+  res.json({ ok: true, status: waStatus, message: 'Initializing WhatsApp...' });
+});
 
-    const interval = parseInt(req.body.interval, 10) || 5; // seconds
-    const messageTemplate = req.body.message;
-    const results = [];
-    const csvPath = req.file.path;
-
-    // Parse CSV
+// Disconnect
+app.post('/api/disconnect', async (req, res) => {
+  if (waClient) {
     try {
-        await new Promise((resolve, reject) => {
-            fs.createReadStream(csvPath)
-                .pipe(csv())
-                .on('data', (row) => results.push(row))
-                .on('end', resolve)
-                .on('error', reject);
-        });
-        fs.unlinkSync(csvPath); // clean up upload
-    } catch (err) {
-        fs.unlinkSync(csvPath);
-        return res.status(400).json({ error: 'Invalid CSV file.' });
-    }
-
-    if (results.length === 0) {
-        return res.status(400).json({ error: 'CSV file is empty.' });
-    }
-
-    // Basic validation: must have a column with phone number (case-insensitive)
-    const headers = Object.keys(results[0]).map(h => h.toLowerCase());
-    const phoneColumn = headers.find(h => h === 'phone' || h === 'number' || h === 'phonenumber' || h === 'mobile');
-    if (!phoneColumn) {
-        return res.status(400).json({ error: 'CSV must have a column named "phone", "number", "mobile" or similar.' });
-    }
-
-    res.json({ message: 'Blast started', total: results.length });
-    isSending = true;
-
-    // Process rows
-    let sent = 0;
-    let failed = 0;
-    for (let i = 0; i < results.length; i++) {
-        const row = results[i];
-        let phone = row[Object.keys(row).find(k => k.toLowerCase() === phoneColumn)]?.toString().trim();
-        if (!phone) {
-            failed++;
-            sendStatus(`Row ${i+1}: missing phone number.`, { sent, failed, total: results.length });
-            continue;
-        }
-
-        // Format number: remove everything except digits, ensure it starts with country code
-        phone = phone.replace(/\D/g, '');   // keep only digits
-        if (!phone.startsWith('62') && !phone.startsWith('1') /* etc. */) {
-            // If you want to auto-prepend a default country code, do it here
-            // But your CSV already has 62, so this is fine as-is.
-        }
-        const chatId = `${phone}@c.us`;   // do NOT add '+'
-
-        // Personalize message
-        let personalized = messageTemplate;
-        for (const key of Object.keys(row)) {
-            const placeholder = `{{${key}}}`;
-            personalized = personalized.replace(new RegExp(placeholder, 'g'), row[key]?.toString() || '');
-        }
-
-        // Send message
-        try {
-            await client.sendMessage(chatId, personalized);
-            sent++;
-            sendStatus(`Sent to ${phone}`, { sent, failed, total: results.length });
-        } catch (err) {
-            failed++;
-            sendStatus(`Failed for ${phone}: ${err.message}`, { sent, failed, total: results.length });
-        }
-
-        // Interval between messages (except after the last one)
-        if (i < results.length - 1) {
-            await new Promise(resolve => setTimeout(resolve, interval * 1000));
-        }
-    }
-
-    isSending = false;
-    sendStatus(`Blast finished: ${sent} sent, ${failed} failed.`, { sent, failed, total: results.length });
+      await waClient.logout();
+      await waClient.destroy();
+    } catch (_) {}
+    waClient = null;
+  }
+  // Remove session
+  try { fs.rmSync('./wa_session', { recursive: true, force: true }); } catch (_) {}
+  waStatus = 'disconnected';
+  io.emit('wa_status', { status: waStatus });
+  res.json({ ok: true });
 });
 
-app.listen(PORT, () => {
-    console.log(`WhatsApp Blast app listening on http://localhost:${PORT}`);
+// Upload & Parse CSV
+app.post('/api/parse-csv', upload.single('csv'), (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'No CSV file uploaded' });
+
+  const results = [];
+  const stream = require('stream');
+  const bufferStream = new stream.PassThrough();
+  bufferStream.end(req.file.buffer);
+
+  bufferStream
+    .pipe(parse({ columns: true, skip_empty_lines: true, trim: true }))
+    .on('data', (row) => results.push(row))
+    .on('error', (err) => res.status(400).json({ error: 'CSV parse error: ' + err.message }))
+    .on('end', () => {
+      if (results.length === 0) return res.status(400).json({ error: 'CSV is empty' });
+      const columns = Object.keys(results[0]);
+      res.json({ ok: true, rows: results, columns, count: results.length });
+    });
+});
+
+// Send Blast
+app.post('/api/send-blast', async (req, res) => {
+  if (waStatus !== 'ready') {
+    return res.status(400).json({ error: 'WhatsApp is not connected. Please scan the QR code first.' });
+  }
+  if (blastRunning) {
+    return res.status(400).json({ error: 'A blast is already running' });
+  }
+
+  const { rows, template, phoneColumn, delayMs = 2000 } = req.body;
+
+  if (!rows || !template || !phoneColumn) {
+    return res.status(400).json({ error: 'Missing rows, template, or phoneColumn' });
+  }
+
+  blastRunning = true;
+  res.json({ ok: true, total: rows.length, message: 'Blast started' });
+
+  // Run blast asynchronously
+  (async () => {
+    const results = [];
+    io.emit('blast_start', { total: rows.length });
+
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i];
+      let phone = (row[phoneColumn] || '').replace(/\D/g, '');
+
+      // Normalize phone number
+      if (!phone) {
+        results.push({ row: i + 1, phone: 'N/A', status: 'skipped', reason: 'Empty phone' });
+        io.emit('blast_progress', { index: i, total: rows.length, phone: 'N/A', status: 'skipped', results });
+        continue;
+      }
+
+      // Build personalized message
+      let message = template;
+      Object.keys(row).forEach((key) => {
+        message = message.replace(new RegExp(`{{${key}}}`, 'g'), row[key] || '');
+      });
+
+      try {
+        // Format: countrycode+number@c.us (assume intl format)
+        const chatId = `${phone}@c.us`;
+        await waClient.sendMessage(chatId, message);
+        results.push({ row: i + 1, phone, status: 'sent' });
+        io.emit('blast_progress', { index: i, total: rows.length, phone, status: 'sent', results });
+        console.log(`[Blast] ✓ Sent to ${phone}`);
+      } catch (err) {
+        const reason = err.message || 'Unknown error';
+        results.push({ row: i + 1, phone, status: 'failed', reason });
+        io.emit('blast_progress', { index: i, total: rows.length, phone, status: 'failed', reason, results });
+        console.error(`[Blast] ✗ Failed to ${phone}: ${reason}`);
+      }
+
+      // Rate limit delay (avoid WA ban)
+      if (i < rows.length - 1) {
+        await new Promise((r) => setTimeout(r, delayMs));
+      }
+    }
+
+    blastRunning = false;
+    const sent = results.filter((r) => r.status === 'sent').length;
+    const failed = results.filter((r) => r.status === 'failed').length;
+    const skipped = results.filter((r) => r.status === 'skipped').length;
+    io.emit('blast_done', { total: rows.length, sent, failed, skipped, results });
+    console.log(`[Blast] Done — Sent: ${sent}, Failed: ${failed}, Skipped: ${skipped}`);
+  })();
+});
+
+// Cancel blast (best-effort)
+app.post('/api/cancel-blast', (req, res) => {
+  blastRunning = false;
+  io.emit('blast_cancelled', {});
+  res.json({ ok: true });
+});
+
+// ─── Socket.IO ───────────────────────────────────────────────────────────────
+io.on('connection', (socket) => {
+  console.log('[Socket] Client connected:', socket.id);
+  // Send current state immediately on connect
+  socket.emit('wa_status', { status: waStatus });
+  if (currentQR) socket.emit('wa_qr', { qr: currentQR });
+  socket.on('disconnect', () => console.log('[Socket] Client disconnected:', socket.id));
+});
+
+// ─── Start Server ─────────────────────────────────────────────────────────────
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => {
+  console.log(`\n🚀 WhatsApp Blast Server running at http://localhost:${PORT}`);
+  console.log('📱 Open the URL above in your browser to get started\n');
 });
